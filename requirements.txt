@@ -1,0 +1,8 @@
+transformers
+torch
+accelerate
+bitsandbytes
+fastapi
+uvicorn[standard]
+pydantic
+huggingface_hub 
