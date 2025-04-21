@@ -1,178 +1,115 @@
-# LLM Inference Server with Tool Usage (using Celery)
+# Weather MCP Server Example
 
-This repository contains a FastAPI-based inference server designed to interact with Large Language Models (LLMs) like Qwen-14B. It provides a backend for conversational AI applications, enabling multi-turn dialogue, integration of external tools, and real-time streaming output via Celery background tasks.
+This repository contains a simple FastAPI-based server demonstrating the Model Context Protocol (MCP) for retrieving weather information. It provides a backend that can be inspected and interacted with using the MCP Inspector tool.
 
 ## Architecture Overview
 
-This server employs a dual-protocol approach:
+This server implements the Model Context Protocol (MCP) over standard input/output (STDIO) when launched via a tool like the MCP Inspector. It listens for JSON-RPC 2.0 requests conforming to the MCP specification and responds accordingly.
 
-1.  **JSON-RPC 2.0 (`/rpc` endpoint):** Used for **initiating** potentially long-running tasks like LLM inference. It immediately returns a Celery Task ID.
-2.  **Server-Sent Events (SSE) (`/stream/{taskId}` endpoint):** Used for **receiving the results** of a previously initiated task. The client connects using the Celery Task ID to get status updates (`PENDING`, `STARTED`, `SUCCESS`, `FAILURE`) and the final result.
+The core functionality involves:
 
-The core LLM processing is offloaded to background **Celery workers**, using **Redis** as both the message broker and the result backend. The FastAPI server handles HTTP requests, sends tasks to the Celery broker via Redis, and streams results via SSE by polling the task status/result from the Redis backend.
+1.  **Receiving MCP Requests:** Parsing JSON-RPC messages from standard input.
+2.  **Handling `get_tools`:** Responding with the available `get_current_weather` tool definition.
+3.  **Handling `call_tool`:** Executing the `get_current_weather` function based on the provided parameters (location, unit) and returning the result.
+4.  **Sending MCP Responses:** Writing JSON-RPC responses back to standard output.
 
 ## Key Features
 
-*   **Dual Protocol:** Asynchronous task initiation via JSON-RPC (`/rpc`) and result streaming via SSE (`/stream/{taskId}`).
-*   **Background Task Processing:** Uses **Celery and Redis** to offload LLM inference to separate worker processes.
-*   **Task State Polling:** The `/stream` endpoint polls the Celery task status (`PENDING`, `STARTED`, `SUCCESS`, `FAILURE`) and streams updates and the final result.
-*   **Multi-Turn Conversation & Tool Calling:** Logic remains in prompt generation; execution is asynchronous.
-*   **Configurable LLM & Loop Prevention:** Safeguards remain in prompt generation.
-*   **Built with FastAPI & Celery:** Combines FastAPI, Celery, and Redis.
-
-## Workflow
-
-1.  **Client Request (`/rpc`):** Sends JSON-RPC request (`create_message`) with history/message.
-2.  **Server Sends Task (`/rpc`):**
-    *   Generates LLM prompt.
-    *   Sends the task to the Celery broker (Redis) using `task.delay()`.
-    *   **Immediately returns** JSON-RPC response with the unique `taskId` (Celery Task ID).
-3.  **Worker Processing (Background):**
-    *   A Celery worker process picks up the task from the Redis broker.
-    *   Initializes the LLM pipeline if not already done in that worker process.
-    *   Executes the LLM inference task (`run_llm_inference_task`).
-    *   Saves the result dictionary (containing `cleaned_response_text`, etc.) back to the Redis result backend.
-4.  **Client Connects to Stream (`/stream/{taskId}`):** Connects via SSE using the `taskId`.
-5.  **Server Polls & Streams Results (`/stream/{taskId}`):**
-    *   The server endpoint gets a Celery `AsyncResult` object using the `taskId`.
-    *   Periodically polls `async_result.state`.
-    *   Sends status updates (`PENDING`, `STARTED`, etc.) via SSE.
-    *   When state is `SUCCESS`:
-        *   Retrieves the result dictionary (`async_result.result`).
-        *   Parses the result (checks for tool calls, etc.).
-        *   Sends the final result via SSE (`{"type": "final_text", ...}` or `{"type": "tool_calls", ...}`).
-    *   When state is `FAILURE`:
-        *   Retrieves error info (`async_result.traceback`).
-        *   Sends an SSE error event.
-    *   Sends an SSE end event when finished or failed.
-6.  **Tool Execution (Client-Side):** If result is `tool_calls`, client executes them.
-7.  **Loop:** Client sends tool results back via a *new* `/rpc` call, starting a new task.
+*   **MCP Implementation:** Adheres to the Model Context Protocol specification.
+*   **Tool Definition:** Exposes a `get_current_weather` tool.
+*   **Simple Tool Logic:** Provides hardcoded weather data for demonstration purposes.
+*   **FastAPI & Pydantic:** Built using FastAPI for structure and Pydantic for data validation (though HTTP endpoints are not the primary interaction method when used with MCP Inspector via STDIO).
+*   **STDIO Transport:** Designed to communicate via standard input/output when launched by an MCP client/inspector.
 
 ## Setup
 
 1.  **Clone Repository:**
     ```bash
-    git clone <repository-url>
-    cd inference-server
+    git clone <repository-url> # Replace with your repo URL
+    cd weather-mcp-server
     ```
 
 2.  **Install Dependencies:**
     Use a virtual environment:
     ```bash
     python -m venv venv
-    source venv/bin/activate # Windows: venv\\Scripts\\activate
+    # Windows
+    .\venv\Scripts\activate
+    # macOS/Linux
+    source venv/bin/activate
     ```
-    Install required packages (create `requirements.txt` recommended):
+    Install required packages:
     ```bash
-    # Core FastAPI, Transformers, Torch
-    pip install fastapi uvicorn "pydantic>=2.0" "transformers>=4.38.0" "torch>=2.1.0" accelerate bitsandbytes sentencepiece Jinja2 
-    # SSE Streaming
-    pip install sse-starlette
-    # Celery with Redis support
-    pip install "celery[redis]>=5.0" 
+    pip install -r requirements.txt
+    # Or install manually:
+    # pip install fastapi uvicorn pydantic
+    # pip install uv # If you want to use uv as the server runner
     ```
-    *Note: Ensure correct PyTorch/CUDA version.*
 
-3.  **Run Redis Server:**
-    Celery uses Redis as the message broker and result backend. Ensure Redis server is running and accessible (default: `localhost:6379`).
-    *   Installation: [https://redis.io/docs/getting-started/installation/](https://redis.io/docs/getting-started/installation/)
-    *   Running: `redis-server`
+## Running with MCP Inspector
 
-4.  **Configure Model:**
-    *   Open `shared.py`.
-    *   Modify the `MODEL_ID` variable if needed.
+The primary way to interact with this server is through the MCP Inspector.
 
-5.  **Hardware Requirements:**
-    *   Significant RAM/VRAM, CUDA toolkit/drivers for GPU.
-
-## Running the Server and Worker
-
-Run two separate processes:
-
-1.  **FastAPI Server:**
+1.  **Install MCP Inspector:**
     ```bash
-    python server.py
+    npm install -g @modelcontextprotocol/inspector
     ```
-    Handles HTTP requests, sends tasks to Celery.
 
-2.  **Celery Worker:**
-    Open *another terminal* (same directory & environment). Run:
+2.  **Launch Inspector:**
     ```bash
-    # Basic command (adjust log level as needed):
-    celery -A celery_app worker --loglevel=info 
-    
-    # On Windows, you might need the 'eventlet' or 'gevent' pool 
-    # if you encounter concurrency issues (install them first: pip install eventlet/gevent):
-    # celery -A celery_app worker --loglevel=info -P eventlet 
-    # celery -A celery_app worker --loglevel=info -P gevent 
+    npx @modelcontextprotocol/inspector
+    # or simply `inspector` if installed globally
     ```
-    This connects to Redis, discovers tasks (like `run_llm_inference_task`), and executes them.
 
-Server listens on `http://0.0.0.0:8000` by default.
+3.  **Configure Connection in Inspector UI:**
+    *   **Transport Type:** Select `STDIO`.
+    *   **Command:** Enter `uv` (or `python` if not using `uv`).
+    *   **Arguments:** Enter `run src/weather/server.py` (if using `uv`) or `src/weather/server.py` (if using `python`).
+    *   **Working Directory (CWD):** **Crucially, set this to the root directory of this project** (`D:\project\weather-mcp-server` or wherever you cloned it).
+        *   *If the CWD option isn't directly available, you might need to use a wrapper script (see README troubleshooting section if needed).* 
+    *   Click **Connect**.
 
-## API Endpoints
+4.  **Interact via Inspector:**
+    *   Once connected, you can send MCP requests like `get_tools` or `call_tool` using the Inspector's UI.
+    *   Example `call_tool` request body:
+        ```json
+        {
+          "jsonrpc": "2.0",
+          "method": "call_tool",
+          "params": {
+            "tool_name": "get_current_weather",
+            "parameters": {
+              "location": "London",
+              "unit": "celsius"
+            }
+          },
+          "id": 1
+        }
+        ```
 
-### 1. `/rpc` (POST)
+## Running Standalone (for basic HTTP check - less relevant for MCP)
 
-Initiates LLM tasks asynchronously via JSON-RPC 2.0.
+You can run the FastAPI server directly to check if the basic setup is working, but it won't respond to MCP requests this way.
 
-**Methods:**
+```bash
+# Make sure you are in the project root directory (weather-mcp-server)
+# Using uv
+uv run src.weather.server:app --reload 
 
-*   **`create_message`:** Takes history/message/tools, sends task to Celery, **returns `{"taskId": "<celery_task_id>"}`**.
-*   **`tool_list`:** Returns empty list.
-
-### 2. `/stream/{task_id}` (GET)
-
-Streams status (`PENDING`, `STARTED`, `SUCCESS`, `FAILURE`) and final result of a Celery task via SSE. Uses the `taskId` from `/rpc`.
+# Using uvicorn (standard FastAPI runner)
+# uvicorn src.weather.server:app --reload
+```
+This will start a standard HTTP server (e.g., on `http://127.0.0.1:8000`), but the MCP logic relies on STDIO communication when launched via the Inspector.
 
 ## Project Structure
 
-*   `server.py`: Main FastAPI application.
-*   `tasks.py`: Defines Celery task functions.
-*   **`celery_app.py`**: Defines the Celery application instance.
-*   `utils.py`: Helper functions.
-*   `shared.py`: Shared state (LLM pipeline, model ID).
-*   `models.py`: Pydantic models.
-*   `inference_server.log`: Log file.
-*   `(Suggested) requirements.txt`: Dependencies.
+*   `src/weather/server.py`: Main application logic, handles MCP requests via STDIO.
+*   `src/weather/tools.py`: Defines the `get_current_weather` tool.
+*   `src/weather/models.py`: Pydantic models for request/response validation.
+*   `.gitignore`: Specifies intentionally untracked files that Git should ignore.
+*   `requirements.txt`: Lists project dependencies.
 *   `README.md`: This file.
-*   `Qwen-14B/`: Example local model folder.
 
-## Future Considerations
+## Troubleshooting
 
-*   Multiple Queues: Route different task types to different Celery queues/workers.
-*   Monitoring: Use Celery Flower or integrate with Prometheus/Grafana.
-*   Error Handling: More sophisticated retry logic in Celery tasks.
-
-## Project Structure
-
-*   `server.py`: Main FastAPI application (loads model, handles HTTP endpoints, manages RQ queue).
-*   `tasks.py`: Defines the background task function (`run_llm_inference_task`) executed by RQ workers.
-*   `utils.py`: Contains helper functions (prompt generation, response parsing).
-*   `shared.py`: Holds shared state (like the loaded LLM pipeline) accessible by both server and workers.
-*   `inference_server.log`: Log file where server and worker output is written (created on first run).
-*   `(Suggested) requirements.txt`: Dependencies.
-*   `README.md`: This file.
-*   `Qwen-14B/` (Example local model folder):
-    ```text
-    Qwen-14B/
-    ├── .cache/             # Optional cache files
-    │   └── huggingface/
-    ├── figures/            # Optional figure files from model repo
-    ├── config.json
-    ├── generation_config.json
-    ├── model-*.safetensors
-    ├── model.safetensors.index.json
-    ├── tokenizer_config.json
-    └── tokenizer.json
-    ```
-
-## Future Considerations
-
-(Ideas inspired by generic dual-protocol patterns, not currently implemented)
-
-*   **External State Management:** Using Redis or similar to manage conversation state if scaling to multiple server instances.
-*   **Task Queues:** Offloading long-running tool executions or complex processing.
-*   **Advanced Streaming Control:** Implementing backpressure if clients consume SSE streams too slowly.
-*   **Enhanced Error Reporting:** More detailed error objects sent via SSE.
-*   **Monitoring:** Integrating Prometheus/Grafana for monitoring request latency, SSE connections, resource usage, etc. 
+*   **Inspector Connection Error ("File not found"):** Ensure the **Working Directory (CWD)** in the Inspector is set correctly to the project's root folder (`weather-mcp-server`). If the CWD option is unavailable, consider using a wrapper script (e.g., `run.bat` or `run.sh`) that first changes the directory and then executes the server command (`uv run ...` or `python ...`), and point the Inspector's **Command** field to this script. 
