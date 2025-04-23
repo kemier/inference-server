@@ -162,17 +162,24 @@ def generate_conversation_prompt(
     # --- Updated Instructions --- 
     instruction_text = "\nINSTRUCTIONS:\n"
 
-    # Case 1: Last message was a TOOL_RESULT
-    if last_message_role == 'tool':
+    # Determine the effective last role, considering if the server just added an instruction after a tool result
+    effective_last_role = last_message_role
+    if len(history) >= 2 and history[-1].role == 'user' and history[-2].role == 'tool':
+        # If the last message is a user instruction following a tool result, treat it like we just got the tool result
+        effective_last_role = 'tool' 
+        # We might want to make the instruction slightly different in this specific sub-case later if needed.
+
+    # Case 1: Effective last message was a TOOL_RESULT (or server instruction after tool result)
+    if effective_last_role == 'tool':
         instruction_text += (
             "A tool has just been executed and its result is available in the history above.\n"
             "- Analyze the TOOL_RESULT provided in the conversation history.\n"
-            "- <think>Consider the key information from the TOOL_RESULT and the LATEST USER QUESTION.</think>\n"
-            "- Generate a final, user-friendly text response that directly answers the LATEST USER QUESTION based on the TOOL_RESULT.\n"
-            "- **Your response MUST contain ONLY the final answer for the user.** Do NOT include any prefix like 'Summary:' or 'Answer:'.\n"
+            "- <think>Consider the key information from the TOOL_RESULT and the LATEST USER QUESTION (or the explicit instruction given right after the tool result).</think>\n"
+            "- Generate a final, user-friendly text response that directly answers the LATEST USER QUESTION or follows the explicit instruction, based on the TOOL_RESULT.\n"
+            "- **Your response MUST contain ONLY the final answer/summary for the user.** Do NOT include any prefix like 'Summary:' or 'Answer:'.\n"
             "- **Do NOT call any tools** in this response. **Do NOT output any JSON object.**\n"
         )
-    # Case 2: Tools are available, but last message was not a tool result
+    # Case 2: Tools are available, not immediately after a tool result
     elif tools:
         example_json = json.dumps({ # Use json.dumps for robust example generation
             "tool": "some@tool",

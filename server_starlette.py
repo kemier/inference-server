@@ -216,13 +216,54 @@ async def websocket_endpoint(websocket: WebSocket):
                             tool_error=error_data      # Use extracted error
                         )
                         current_history.append(tool_message)
-                        logging.info(f"{ws_log_prefix} Appended tool result for '{tool_name}' to history. New history length: {len(current_history)}") # Use extracted name
+                        logging.info(f"{ws_log_prefix} Appended tool result for \'{tool_name}\' to history. New history length: {len(current_history)}") # Use extracted name
 
                         # Send acknowledgment for the tool result
                         ack_resp = {"jsonrpc": "2.0", "result": {"status": "received"}, "id": request_id}
                         await websocket.send_text(json.dumps(ack_resp))
 
-                        # --- Check for Empty GitHub Result --- 
+                        # --- ADDED: Explicitly ask LLM to summarize/continue and trigger next generation ---
+                        # Add a follow-up instruction to summarize the tool result
+                        summary_instruction = HistoryMessage(
+                            role="user",
+                            content="请基于上述工具调用结果，继续回答或进行总结。" # "Please continue answering or summarize based on the tool call result above."
+                        )
+                        current_history.append(summary_instruction)
+                        logging.info(f"{ws_log_prefix} Appended summary instruction to history. New history length: {len(current_history)}")
+
+                        # Ensure we are not already running a task (shouldn't be, but safety check)
+                        if active_generation_task and not active_generation_task.done():
+                           logging.warning(f"{ws_log_prefix} Attempting to restart generation after tool result, but a task is still active. This should not happen.")
+                           # Avoid starting a new task if one is somehow still running
+                        else:
+                           # Re-use the generation parameters from the original request if possible
+                           # We need access to the 'params' from the original 'generate' request.
+                           # This state is not currently preserved across the tool call cycle.
+                           # For now, use default/minimal parameters.
+                           # TODO: Persist original generation parameters (like max_tokens, temp) across tool calls.
+                           generation_params_for_continuation = GenerateRequestParams(max_new_tokens=512) # Example default
+
+                           # Get the tools associated with the session (or perhaps the original request's tools)
+                           session_data = SESSIONS.get(session_id, {})
+                           tools_for_continuation = session_data.get("tools") # Or retrieve from original request if stored
+
+                           logging.info(f"{ws_log_prefix} Triggering generation continuation after tool result.")
+                           active_generation_task = asyncio.create_task(
+                               generate_interactive_stream_ws(
+                                   session_id=session_id,
+                                   websocket=websocket,
+                                   history=current_history, # Pass the updated history
+                                   tools=tools_for_continuation, # Pass appropriate tools
+                                   generation_params=generation_params_for_continuation, # Use stored/default params
+                                   # We might need to pass the original task_id or manage task correlation
+                               )
+                           )
+                           # Re-add the done callback to manage the task state
+                           active_generation_task.add_done_callback(_generation_done_callback)
+                        # --- END ADDED SECTION ---
+
+                        # --- Check for Empty GitHub Result ---
+                        # This check might be redundant now or needs integration with the new flow
                         is_empty_github_search = False
                         if tool_name == "github@search_repositories" and isinstance(result_data, dict):
                             # Check common patterns for empty results
@@ -263,28 +304,6 @@ async def websocket_endpoint(websocket: WebSocket):
                             current_iteration = 0
                             logging.debug(f"{ws_log_prefix} Empty tool result handled directly, resetting iteration count.")
                             continue # Skip the rest of the loop iteration for this message
-                        else:
-                            # --- Trigger next generation cycle (Only if result wasn't empty) ---
-                            continuation_tools = current_tools
-                            continuation_params = GenerateRequestParams(
-                                iteration_count=current_iteration, # Use incremented count
-                                max_new_tokens=4096, 
-                                do_sample=True, 
-                                temperature=0.6 
-                            )
-
-                            logging.info(f"{ws_log_prefix} Triggering next generation cycle (Iteration: {current_iteration}, Task ID: {original_task_id}).") # Log task ID
-                            active_generation_task = asyncio.create_task(
-                                generate_interactive_stream_ws(
-                                    session_id=session_id,
-                                    websocket=websocket,
-                                    history=current_history, # Use updated history
-                                    tools=continuation_tools, 
-                                    generation_params=continuation_params,
-                                    task_id=original_task_id  # Pass the original task ID
-                                )
-                            )
-                            active_generation_task.add_done_callback(_generation_done_callback) # Reuse the same callback
 
                     except Exception as tool_e:
                         logging.error(f"{ws_log_prefix} Error processing 'tool_result': {tool_e}")
