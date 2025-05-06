@@ -1,193 +1,176 @@
-# Qwen-14B Inference Server (Starlette + WebSocket)
+# LLM Inference Server via ChatOpenAI (Starlette + WebSocket)
 
-This server provides an interface to a locally hosted Qwen-14B transformer model, primarily using a WebSocket connection for interactive generation with optional tool support. It uses the Starlette web framework and leverages libraries like `transformers`, `torch`, `accelerate`, and `bitsandbytes` for model loading and inference.
+This server provides an interface to OpenAI-compatible LLM APIs (including DeepSeek, OpenAI itself, and others) using Langchain's `ChatOpenAI` client. It uses a WebSocket connection for interactive generation with optional tool support and is built with the Starlette web framework.
 
 ## Features
 
-*   **Model:** Serves the Qwen-14B model (configured to load from the local `./Qwen-14B` directory).
-*   **Quantization:** Uses 4-bit quantization via `bitsandbytes` for potentially lower VRAM usage.
+*   **Model Client:** Uses `langchain_openai.ChatOpenAI` for broad compatibility with OpenAI-spec APIs.
+*   **Configurable Endpoint:** Target different LLMs (DeepSeek, OpenAI, etc.) by changing environment variables for the API Base URL, API Key, and Model Name.
+*   **Langchain Integration:** Leverages `langchain` for LLM interaction.
 *   **Interface:** Primarily uses WebSocket with JSON-RPC 2.0 messages for interactive streaming generation.
-*   **Tool Use:** Supports defining tools during session creation and handling function calls during generation.
+*   **Tool Use:** Supports defining tools (OpenAI JSON Schema compatible) and handling function calls during generation.
 *   **Framework:** Built with Starlette, using Pydantic models (`models.py`) for validation.
 *   **Logging:** Outputs logs to `inference_server.log` (rotating) and the console.
+*   **Dependency Management:** Uses `uv` and `pyproject.toml`.
 
 ## Setup
 
 1.  **Clone the Repository:**
     ```bash
     git clone <your-repository-url>
-    cd <your-repository-directory>
+    cd inference-server
     ```
 
-2.  **Model Download:**
-    *   This server expects the Qwen-14B model files to be present in a directory named `Qwen-14B` within the project root.
-    *   You can download the model using `huggingface-cli` or `git lfs`:
-        ```bash
-        # Example using huggingface-cli (ensure you are logged in: huggingface-cli login)
-        huggingface-cli download --repo-type model Qwen/Qwen1.5-14B --local-dir Qwen-14B --local-dir-use-symlinks False
-
-        # Or using git lfs (requires git-lfs installed)
-        # git lfs install
-        # git clone https://huggingface.co/Qwen/Qwen1.5-14B Qwen-14B # Adjust model ID if needed
-        ```
-    *   Verify the `MODEL_ID` variable in `shared.py` points correctly to `./Qwen-14B`.
-
-3.  **Create Virtual Environment (Recommended):**
+2.  **Create and Activate Virtual Environment (using uv):**
     ```bash
-    python -m venv venv
-    # Windows
-    .\venv\Scripts\activate
-    # macOS/Linux
-    source venv/bin/activate
+    uv venv
+    source .venv/bin/activate 
     ```
 
-4.  **Install Dependencies:**
+3.  **Install Dependencies:**
     ```bash
-    pip install -r requirements.txt
+    uv pip install -e .
     ```
-    *(Note: Ensure you have compatible PyTorch/CUDA versions installed if using GPU acceleration).*
+    This installs the project and its dependencies (including `langchain-openai`, `starlette`, `uvicorn`, etc.) in editable mode.
+
+4.  **Configure Environment Variables:**
+    Create a `.env` file in the project root directory. Configure it for your target LLM API.
+
+    **Example for DeepSeek:**
+    ```dotenv
+    # .env (Example for DeepSeek)
+    API_KEY_ENV_VAR="DEEPSEEK_API_KEY"  # Tells server which env var holds the key
+    DEEPSEEK_API_KEY="your_deepseek_api_key" # Your actual key
+    
+    LLM_BASE_URL="https://api.deepseek.com/v1" # DeepSeek API endpoint
+    LLM_MODEL_NAME="deepseek-chat"          # Specific DeepSeek model
+    ```
+
+    **Example for OpenAI:**
+    ```dotenv
+    # .env (Example for OpenAI)
+    API_KEY_ENV_VAR="OPENAI_API_KEY"
+    OPENAI_API_KEY="your_openai_api_key"
+    
+    # LLM_BASE_URL is optional for OpenAI (defaults work), but can be set if needed
+    # LLM_BASE_URL="https://api.openai.com/v1"
+    LLM_MODEL_NAME="gpt-4o" 
+    ```
+    
+    *   `API_KEY_ENV_VAR` (Optional): Specifies the *name* of the environment variable that contains the actual API key. Defaults to `DEEPSEEK_API_KEY` if not set. Set this to `OPENAI_API_KEY` if using OpenAI.
+    *   `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / etc.: Provide the actual API key using the variable name you specified in `API_KEY_ENV_VAR`.
+    *   `LLM_BASE_URL` (Optional): The base URL for the API endpoint. Defaults to `https://api.deepseek.com/v1` if not set. Use `https://api.openai.com/v1` for standard OpenAI.
+    *   `LLM_MODEL_NAME` (Optional): The specific model identifier for the target API. Defaults to `deepseek-chat` if not set.
 
 ## Running the Server
 
-Execute the main server script:
-
 ```bash
-python server_starlette.py
+uv run python -m inference_server_lib.server_starlette
 ```
 
-The server will start, load the model (this might take time and significant RAM/VRAM), and listen on `0.0.0.0:8000`. You should see log output indicating the server status and model loading progress/completion.
+The server will start, initialize the `ChatOpenAI` client targeting the configured endpoint, and typically listen on `http://0.0.0.0:8000`.
 
-## Usage (API)
+## Usage (WebSocket Client)
 
-Interaction primarily happens over WebSocket after creating a session via HTTP.
+Connect to the WebSocket endpoint: `ws://localhost:8000/ws/{session_id}`
 
-### 1. Create a Session (HTTP)
-
-Send a POST request to `/create_session`.
-
-*   **Endpoint:** `POST /create_session`
-*   **Request Body (optional, `application/json`):**
+1.  **Create a Session (HTTP POST):**
+    Send a POST request to `/create_session` with an optional JSON body defining tools:
     ```json
+    // Example request body (optional tools)
     {
       "tools": [
         {
-          "name": "your_tool_name",
-          "description": "Description of what the tool does.",
+          "name": "get_weather",
+          "description": "Get the current weather for a location",
           "parameters": {
             "type": "object",
             "properties": {
-              "param1": { "type": "string", "description": "Param 1 description" },
-              "param2": { "type": "integer", "description": "Param 2 description" }
+              "location": { "type": "string", "description": "City name" }
             },
-            "required": ["param1"]
+            "required": ["location"]
           }
         }
-        // Add more tools if needed
       ]
     }
     ```
-*   **Response (`application/json`):**
-    ```json
-    {
-      "session_id": "some-unique-session-id-uuid"
-    }
-    ```
-    Store the `session_id` for the WebSocket connection.
+    The response will contain a `session_id`.
 
-### 2. Connect via WebSocket
+2.  **Connect WebSocket:**
+    Use the obtained `session_id` to connect to `ws://localhost:8000/ws/{session_id}`.
 
-Establish a WebSocket connection to:
+3.  **Send Messages (JSON-RPC over WebSocket):**
 
-`ws://<server_host>:8000/ws/{session_id}`
-
-Replace `<server_host>` with the server's IP address or hostname (e.g., `localhost`, `127.0.0.1`) and `{session_id}` with the ID obtained from `/create_session`.
-
-### 3. Communicate via JSON-RPC (WebSocket)
-
-Send and receive JSON-RPC 2.0 messages over the established WebSocket connection.
-
-**Client -> Server Methods:**
-
-*   **`generate`:** Starts a generation task.
-    *   Params (`GenerateRequestParams` in `models.py`):
-        *   `message`: (Optional) The initial user message (string).
-        *   `history`: (Optional) List of previous messages (`List[HistoryMessage]`). Use either `message` or `history`.
-        *   `tools`: (Optional) Override the tools registered with the session for this specific request.
-        *   `max_new_tokens`, `temperature`, `do_sample`, etc. (see `models.py` for details).
-    *   Example Request:
+    *   **Generate Text:**
         ```json
         {
           "jsonrpc": "2.0",
+          "id": 1, 
           "method": "generate",
           "params": {
-            "message": "What is the weather like in London?",
-            "max_new_tokens": 512
-          },
-          "id": 1
+            "history": [
+              { "role": "user", "content": "Hello, tell me a joke." }
+            ]
+            // Optional: "message": "Hello..." (if history is empty)
+            // Optional: "tools": [...] (override session tools for this request)
+            // Optional: generation parameters like "max_new_tokens", "temperature"
+          }
         }
         ```
-    *   Response (Initial): `{"jsonrpc": "2.0", "result": {"status": "processing"}, "id": 1}`
 
-*   **`tool_result`:** Sends the result of a tool call requested by the model.
-    *   Params (`ToolResultParams`):
-        *   `task_id`: The `task_id` received in the `function_call_request` notification.
-        *   `results`: A list containing one result object.
-            *   `tool_name`: Name of the tool that was called.
-            *   `result`: The data returned by the tool execution.
-            *   `isError`: Boolean indicating if the tool execution resulted in an error.
-            *   `error_message`: (Optional) String error message if `isError` is true.
-    *   Example Request:
+    *   **Send Tool Result (if requested by server):**
         ```json
         {
           "jsonrpc": "2.0",
+          "id": 5, 
           "method": "tool_result",
           "params": {
-            "task_id": "task-id-from-llm",
+            "task_id": "task_xyz123", // ID from the function_call_request notification
             "results": [
               {
+                "tool_call_id": "call_abc456", // ID from the function_call_request notification
                 "tool_name": "get_weather",
-                "result": {"temperature": "15°C", "condition": "Cloudy"},
-                "isError": false
+                "result": {"temperature": "15 C", "condition": "Cloudy"} 
+                // OR if error: "is_error": true, "error_message": "API limit reached"
               }
+              // Can include multiple results if multiple tool calls were requested concurrently
             ]
-          },
-          "id": 2
+          }
         }
         ```
-    *   Response: `{"jsonrpc": "2.0", "result": {"status": "received"}, "id": 2}` (Server will then continue generation).
 
-*   **`cancel`:** Attempts to cancel the currently active `generate` task.
-    *   Params: None
-    *   Example Request: `{"jsonrpc": "2.0", "method": "cancel", "id": 3}`
-    *   Response: `{"jsonrpc": "2.0", "result": {"status": "cancelled"}, "id": 3}` or error if no task active.
+    *   **Cancel Generation (Optional):**
+        ```json
+        {"jsonrpc": "2.0", "id": 99, "method": "cancel"}
+        ```
 
-**Server -> Client Notifications (Methods):**
-
-*   **`text_chunk`:** A piece of generated text.
-    *   Params (`TextChunkParams`): `session_id`, `task_id`, `chunk`.
-*   **`function_call_request`:** Model requests a tool/function call.
-    *   Params (`FunctionCallRequestParams`): `session_id`, `task_id`, `tool_calls` (list of `ToolCallRequest` objects with `tool` name and `parameters`).
-*   **`final_text`:** The complete final text response for a turn (after potential tool calls).
-    *   Params (`StreamEndParams`): `session_id`, `task_id`, `final_text`.
-*   **`end`:** Signals the end of the generation stream for the current request.
-    *   Params (`StreamEndParams`): `session_id`, `task_id`.
-*   **`error`:** Indicates an error occurred during processing.
-    *   Params (`ErrorNotificationParams`): `session_id`, `task_id` (optional), `error` (JsonRpcError object with `code`, `message`).
+4.  **Receive Notifications (JSON-RPC over WebSocket):**
+    The server sends notifications (messages without an `id`) for events:
+    *   `text_chunk`: `{ "session_id": "...", "task_id": "...", "chunk": "..." }`
+    *   `function_call_request`: `{ "session_id": "...", "task_id": "...", "request_id": "call_abc456", "tool_name": "...", "parameters": {...} }`
+    *   `end`: `{ "session_id": "...", "task_id": "...", "status_message": "...", "final_text": "..." }` (final_text included on completion)
+    *   `error`: `{ "session_id": "...", "task_id": "...", "error": { "code": ..., "message": "...", "data": ... } }`
 
 ## Project Structure
 
-*   `server_starlette.py`: Main Starlette application, WebSocket logic, HTTP endpoints.
-*   `shared.py`: Shared state, model/tokenizer loading (`load_model`), logging setup (`setup_logging`), `MODEL_ID` configuration.
-*   `utils.py`: Helper functions, including prompt generation (`generate_conversation_prompt`) and the core streaming generation logic (`generate_interactive_stream_ws`).
-*   `models.py`: Pydantic models for API request/response validation and internal data structures.
-*   `tasks.py`: (Currently seems minimal/unused).
-*   `Qwen-14B/`: Directory containing the local Qwen-14B model files (needs to be downloaded).
-*   `requirements.txt`: Python dependencies.
+*   `src/inference_server_lib/`: Contains the core server code.
+    *   `server_starlette.py`: Main Starlette application, WebSocket handling.
+    *   `shared.py`: Shared state, LLM client initialization (`initialize_llm`), logging setup.
+    *   `utils.py`: Helper functions for Langchain message conversion and streaming generation.
+    *   `models.py`: Pydantic models for API validation.
+*   `pyproject.toml`: Project metadata and dependencies (managed with `uv`).
+*   `.env` (gitignored): For storing API keys, base URLs, model names.
+*   `README.md`: This file.
 *   `inference_server.log`: Log file output.
 *   `.gitignore`: Specifies files ignored by Git.
 
 ## Notes
 
-*   Ensure sufficient RAM and VRAM are available for loading and running the Qwen-14B model, even with quantization.
-*   The model path is hardcoded in `shared.py` to `./Qwen-14B`. Adjust if needed.
+*   Ensure your API key for the chosen `LLM_PROVIDER` (OpenAI, Anthropic, DeepSeek, etc.) is correctly set in your `.env` file.
+*   Default models are specified in `shared.py` if `LLM_MODEL_NAME` is not set for a provider.
+*   To add support for another LLM provider:
+    1.  Install its Langchain integration package (e.g., `uv pip install langchain-google-genai`).
+    2.  Add the package to `pyproject.toml` dependencies.
+    3.  Update `shared.py` in the `initialize_llm` function with a new `elif provider == "yourprovider":` block.
+    4.  Set the `LLM_PROVIDER` and its API key in your `.env` file.
 *   Error handling exists, but review logs (`inference_server.log`) for detailed debugging information. 
