@@ -1,0 +1,33 @@
+[project]
+name = "inference-server"
+version = "0.1.0"
+description = "Starlette WebSocket inference server for LLMs (Qwen/transformers, JSON-RPC streaming, tool calling)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "transformers",
+    "torch",
+    "accelerate",
+    "bitsandbytes",
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "huggingface_hub",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+flash = ["flash-attn"]  # for INFERENCE_ATTN_IMPLEMENTATION=flash_attention_2
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+only-include = [
+    "server_starlette.py",
+    "shared.py",
+    "utils.py",
+    "models.py",
+    "tasks.py",
+]

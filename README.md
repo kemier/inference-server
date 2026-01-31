@@ -20,32 +20,30 @@ This server provides an interface to a locally hosted Qwen-14B transformer model
     ```
 
 2.  **Model Download:**
-    *   This server expects the Qwen-14B model files to be present in a directory named `Qwen-14B` within the project root.
-    *   You can download the model using `huggingface-cli` or `git lfs`:
+    *   This server expects the model at a path or Hugging Face ID (default: `./Qwen-14B`). Set `INFERENCE_MODEL_ID` in `.env` or environment to override.
+    *   To pull a 14B model and create `.env`:
         ```bash
-        # Example using huggingface-cli (ensure you are logged in: huggingface-cli login)
-        huggingface-cli download --repo-type model Qwen/Qwen1.5-14B --local-dir Qwen-14B --local-dir-use-symlinks False
-
-        # Or using git lfs (requires git-lfs installed)
-        # git lfs install
-        # git clone https://huggingface.co/Qwen/Qwen1.5-14B Qwen-14B # Adjust model ID if needed
+        uv run python scripts/download_14b_model.py
         ```
-    *   Verify the `MODEL_ID` variable in `shared.py` points correctly to `./Qwen-14B`.
+        This downloads **Qwen/Qwen2.5-14B-Instruct** to `Qwen2.5-14B-Instruct/` and creates `.env` with `INFERENCE_MODEL_ID=Qwen2.5-14B-Instruct`. Optional: `--model-id` and `--local-dir` to choose another model or path.
+    *   Or download manually:
+        ```bash
+        huggingface-cli download Qwen/Qwen2.5-14B-Instruct --local-dir Qwen2.5-14B-Instruct
+        ```
 
-3.  **Create Virtual Environment (Recommended):**
-    ```bash
-    python -m venv venv
-    # Windows
-    .\venv\Scripts\activate
-    # macOS/Linux
-    source venv/bin/activate
-    ```
+3.  **Configuration (optional):**
+    *   Copy `.env.example` to `.env` and adjust, or set environment variables:
+    *   **INFERENCE_MODEL_ID** – Hugging Face model id or local path (default: `./Qwen-14B`).
+    *   **INFERENCE_ATTN_IMPLEMENTATION** – `sdpa` (built-in, no extra dep) or `flash_attention_2` (faster; requires `pip install flash-attn`).
+    *   **INFERENCE_BNB_COMPUTE_DTYPE** – `float16` or `bfloat16` for 4-bit quant compute dtype.
 
-4.  **Install Dependencies:**
+4.  **Create virtual environment and install dependencies:**
     ```bash
-    pip install -r requirements.txt
+    uv venv
+    uv pip install -r requirements.txt
     ```
-    *(Note: Ensure you have compatible PyTorch/CUDA versions installed if using GPU acceleration).*
+    Or: `python -m venv .venv && .venv\Scripts\activate && pip install -r requirements.txt`  
+    For Flash Attention 2 (optional): `uv pip install flash-attn` then set `INFERENCE_ATTN_IMPLEMENTATION=flash_attention_2`. Ensure compatible PyTorch/CUDA for GPU.
 
 ## Running the Server
 
@@ -177,17 +175,17 @@ Send and receive JSON-RPC 2.0 messages over the established WebSocket connection
 ## Project Structure
 
 *   `server_starlette.py`: Main Starlette application, WebSocket logic, HTTP endpoints.
-*   `shared.py`: Shared state, model/tokenizer loading (`load_model`), logging setup (`setup_logging`), `MODEL_ID` configuration.
+*   `shared.py`: Shared state, model/tokenizer loading (`load_model`), logging setup; model/attention config via env (see `.env.example`).
 *   `utils.py`: Helper functions, including prompt generation (`generate_conversation_prompt`) and the core streaming generation logic (`generate_interactive_stream_ws`).
 *   `models.py`: Pydantic models for API request/response validation and internal data structures.
 *   `tasks.py`: (Currently seems minimal/unused).
 *   `Qwen-14B/`: Directory containing the local Qwen-14B model files (needs to be downloaded).
-*   `requirements.txt`: Python dependencies.
+*   `requirements.txt`: Python dependencies. `.env.example`: env vars for model and attention backend.
 *   `inference_server.log`: Log file output.
 *   `.gitignore`: Specifies files ignored by Git.
 
 ## Notes
 
 *   Ensure sufficient RAM and VRAM are available for loading and running the Qwen-14B model, even with quantization.
-*   The model path is hardcoded in `shared.py` to `./Qwen-14B`. Adjust if needed.
+*   Model and attention backend are configurable via env (`INFERENCE_MODEL_ID`, `INFERENCE_ATTN_IMPLEMENTATION`); see `.env.example`.
 *   Error handling exists, but review logs (`inference_server.log`) for detailed debugging information. 

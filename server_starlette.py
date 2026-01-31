@@ -173,141 +173,114 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 elif rpc_request.method == "tool_result":
                     logging.info(f"{ws_log_prefix} Received 'tool_result' request (ID: {request_id}).")
-                    # Ensure a generation isn't already running (shouldn't happen if client waits)
+                    skip_tool_result = False
                     if active_generation_task and not active_generation_task.done():
-                         logging.warning(f"{ws_log_prefix} Received 'tool_result' while generation is running. Ignoring.")
-                         await send_jsonrpc_error(websocket, JsonRpcErrorCode.INTERNAL_ERROR, "Cannot process tool result while generation is active", request_id)
-                         continue
-
-                    # Check if we are actually expecting a tool result (iteration > 0)
-                    if current_iteration == 0:
+                        logging.warning(f"{ws_log_prefix} Received 'tool_result' while generation is running. Ignoring.")
+                        await send_jsonrpc_error(websocket, JsonRpcErrorCode.INTERNAL_ERROR, "Cannot process tool result while generation is active", request_id)
+                        skip_tool_result = True
+                    elif current_iteration == 0:
                         logging.warning(f"{ws_log_prefix} Received 'tool_result' when no tool call was expected (iteration is 0). Ignoring stale result.")
-                        # Send acknowledgment anyway so client isn't stuck waiting?
                         ack_resp = {"jsonrpc": "2.0", "result": {"status": "received_ignored"}, "id": request_id}
                         await websocket.send_text(json.dumps(ack_resp))
-                        continue
-                    
-                    try:
-                        # Validate tool result parameters (Now expects ToolResultParams with results list)
-                        params = ToolResultParams(**(rpc_request.params or {}))
-                        original_task_id = params.task_id # Extract the original task ID
-                        
-                        # Process the results list (currently assuming only one result)
-                        if not params.results:
-                            logging.warning(f"{ws_log_prefix} Received 'tool_result' with empty results list.")
-                            await send_jsonrpc_error(websocket, JsonRpcErrorCode.INVALID_PARAMS, "Received tool_result with no results data", request_id)
-                            continue
-                        
-                        # --- Corrected Logic --- 
-                        # For now, process only the first result in the list
-                        first_result = params.results[0]
-                        tool_name = first_result.tool_name
-                        result_data = first_result.result
-                        error_data = first_result.error_message if first_result.isError else None
-                        # --- End Corrected Logic ---
+                        skip_tool_result = True
 
-                        logging.debug(f"{ws_log_prefix} Parsed tool result for tool: {tool_name}") # Use extracted tool_name
+                    if not skip_tool_result:
+                        try:
+                            # Validate tool result parameters (Now expects ToolResultParams with results list)
+                            params = ToolResultParams(**(rpc_request.params or {}))
+                            original_task_id = params.task_id  # Extract the original task ID
 
-                        # Append tool result to the current history using extracted data
-                        tool_message = HistoryMessage(
-                            role="tool",
-                            tool_name=tool_name,        # Use extracted name
-                            tool_result=result_data,    # Use extracted result
-                            tool_error=error_data      # Use extracted error
-                        )
-                        current_history.append(tool_message)
-                        logging.info(f"{ws_log_prefix} Appended tool result for \'{tool_name}\' to history. New history length: {len(current_history)}") # Use extracted name
+                            # Process the results list (currently assuming only one result)
+                            if not params.results:
+                                logging.warning(f"{ws_log_prefix} Received 'tool_result' with empty results list.")
+                                await send_jsonrpc_error(websocket, JsonRpcErrorCode.INVALID_PARAMS, "Received tool_result with no results data", request_id)
+                                continue
 
-                        # Send acknowledgment for the tool result
-                        ack_resp = {"jsonrpc": "2.0", "result": {"status": "received"}, "id": request_id}
-                        await websocket.send_text(json.dumps(ack_resp))
+                            # --- Corrected Logic ---
+                            # For now, process only the first result in the list
+                            first_result = params.results[0]
+                            tool_name = first_result.tool_name
+                            result_data = first_result.result
+                            error_data = first_result.error_message if first_result.isError else None
+                            # --- End Corrected Logic ---
 
-                        # --- ADDED: Explicitly ask LLM to summarize/continue and trigger next generation ---
-                        # Add a follow-up instruction to summarize the tool result
-                        summary_instruction = HistoryMessage(
-                            role="user",
-                            content="请基于上述工具调用结果，继续回答或进行总结。" # "Please continue answering or summarize based on the tool call result above."
-                        )
-                        current_history.append(summary_instruction)
-                        logging.info(f"{ws_log_prefix} Appended summary instruction to history. New history length: {len(current_history)}")
+                            logging.debug(f"{ws_log_prefix} Parsed tool result for tool: {tool_name}")
 
-                        # Ensure we are not already running a task (shouldn't be, but safety check)
-                        if active_generation_task and not active_generation_task.done():
-                           logging.warning(f"{ws_log_prefix} Attempting to restart generation after tool result, but a task is still active. This should not happen.")
-                           # Avoid starting a new task if one is somehow still running
-                        else:
-                           # Re-use the generation parameters from the original request if possible
-                           # We need access to the 'params' from the original 'generate' request.
-                           # This state is not currently preserved across the tool call cycle.
-                           # For now, use default/minimal parameters.
-                           # TODO: Persist original generation parameters (like max_tokens, temp) across tool calls.
-                           generation_params_for_continuation = GenerateRequestParams(max_new_tokens=512) # Example default
+                            # Append tool result to the current history using extracted data
+                            tool_message = HistoryMessage(
+                                role="tool",
+                                tool_name=tool_name,
+                                tool_result=result_data,
+                                tool_error=error_data,
+                            )
+                            current_history.append(tool_message)
+                            logging.info(f"{ws_log_prefix} Appended tool result for '{tool_name}' to history. New history length: {len(current_history)}")
 
-                           # Get the tools associated with the session (or perhaps the original request's tools)
-                           session_data = SESSIONS.get(session_id, {})
-                           tools_for_continuation = session_data.get("tools") # Or retrieve from original request if stored
+                            # Send acknowledgment for the tool result
+                            ack_resp = {"jsonrpc": "2.0", "result": {"status": "received"}, "id": request_id}
+                            await websocket.send_text(json.dumps(ack_resp))
 
-                           logging.info(f"{ws_log_prefix} Triggering generation continuation after tool result.")
-                           active_generation_task = asyncio.create_task(
-                               generate_interactive_stream_ws(
-                                   session_id=session_id,
-                                   websocket=websocket,
-                                   history=current_history, # Pass the updated history
-                                   tools=tools_for_continuation, # Pass appropriate tools
-                                   generation_params=generation_params_for_continuation, # Use stored/default params
-                                   # We might need to pass the original task_id or manage task correlation
-                               )
-                           )
-                           # Re-add the done callback to manage the task state
-                           active_generation_task.add_done_callback(_generation_done_callback)
-                        # --- END ADDED SECTION ---
+                            # Add follow-up instruction and trigger next generation
+                            summary_instruction = HistoryMessage(
+                                role="user",
+                                content="请基于上述工具调用结果，继续回答或进行总结。",
+                            )
+                            current_history.append(summary_instruction)
+                            logging.info(f"{ws_log_prefix} Appended summary instruction to history. New history length: {len(current_history)}")
 
-                        # --- Check for Empty GitHub Result ---
-                        # This check might be redundant now or needs integration with the new flow
-                        is_empty_github_search = False
-                        if tool_name == "github@search_repositories" and isinstance(result_data, dict):
-                            # Check common patterns for empty results
-                            if not result_data.get("items") and not result_data.get("repositories"):
-                                is_empty_github_search = True
-                            elif isinstance(result_data.get("items"), list) and not result_data.get("items"):
-                                is_empty_github_search = True
-                            elif isinstance(result_data.get("repositories"), list) and not result_data.get("repositories"):
-                                is_empty_github_search = True
-                        
-                        if is_empty_github_search:
-                            logging.info(f"{ws_log_prefix} Detected empty result for {tool_name}. Sending direct response.")
-                            # Construct predefined response
-                            final_text = "Sorry, the search for GitHub repositories didn't return any relevant results."
-                            # Send final_text notification
-                            final_params = StreamEndParams(session_id=session_id, task_id=params.task_id, final_text=final_text)
-                            # Need a helper to send notifications here, or adapt _send_notification context
-                            # For now, directly create and send:
-                            # Construct the notification manually
-                            final_text_notification = {
-                                "jsonrpc": "2.0",
-                                "method": "final_text",
-                                "params": final_params.model_dump()
-                            }
-                            notif_str = json.dumps(final_text_notification)
-                            await websocket.send_text(notif_str)
-                            # Send end notification
-                            end_params = StreamEndParams(session_id=session_id, task_id=params.task_id)
-                            # Construct the notification manually
-                            end_notification = {
-                                "jsonrpc": "2.0",
-                                "method": "end",
-                                "params": end_params.model_dump()
-                            }
-                            notif_str_end = json.dumps(end_notification)
-                            await websocket.send_text(notif_str_end)
-                            # Reset iteration count and skip LLM call for this turn
-                            current_iteration = 0
-                            logging.debug(f"{ws_log_prefix} Empty tool result handled directly, resetting iteration count.")
-                            continue # Skip the rest of the loop iteration for this message
+                            # Ensure we are not already running a task (safety check)
+                            if active_generation_task and not active_generation_task.done():
+                                logging.warning(f"{ws_log_prefix} Attempting to restart generation after tool result, but a task is still active. This should not happen.")
+                            else:
+                                generation_params_for_continuation = GenerateRequestParams(max_new_tokens=512)
+                                session_data = SESSIONS.get(session_id, {})
+                                tools_for_continuation = session_data.get("tools")
+                                logging.info(f"{ws_log_prefix} Triggering generation continuation after tool result.")
+                                active_generation_task = asyncio.create_task(
+                                    generate_interactive_stream_ws(
+                                        session_id=session_id,
+                                        websocket=websocket,
+                                        history=current_history,
+                                        tools=tools_for_continuation,
+                                        generation_params=generation_params_for_continuation,
+                                    )
+                                )
+                                active_generation_task.add_done_callback(_generation_done_callback)
 
-                    except Exception as tool_e:
-                        logging.error(f"{ws_log_prefix} Error processing 'tool_result': {tool_e}")
-                        await send_jsonrpc_error(websocket, JsonRpcErrorCode.INVALID_PARAMS, f"Invalid tool_result params or internal error: {tool_e}", request_id)
+                            # Check for empty GitHub result and send direct response if needed
+                            is_empty_github_search = False
+                            if tool_name == "github@search_repositories" and isinstance(result_data, dict):
+                                if not result_data.get("items") and not result_data.get("repositories"):
+                                    is_empty_github_search = True
+                                elif isinstance(result_data.get("items"), list) and not result_data.get("items"):
+                                    is_empty_github_search = True
+                                elif isinstance(result_data.get("repositories"), list) and not result_data.get("repositories"):
+                                    is_empty_github_search = True
+
+                            if is_empty_github_search:
+                                logging.info(f"{ws_log_prefix} Detected empty result for {tool_name}. Sending direct response.")
+                                final_text = "Sorry, the search for GitHub repositories didn't return any relevant results."
+                                final_params = StreamEndParams(session_id=session_id, task_id=params.task_id, final_text=final_text)
+                                final_text_notification = {
+                                    "jsonrpc": "2.0",
+                                    "method": "final_text",
+                                    "params": final_params.model_dump(),
+                                }
+                                await websocket.send_text(json.dumps(final_text_notification))
+                                end_params = StreamEndParams(session_id=session_id, task_id=params.task_id)
+                                end_notification = {
+                                    "jsonrpc": "2.0",
+                                    "method": "end",
+                                    "params": end_params.model_dump(),
+                                }
+                                await websocket.send_text(json.dumps(end_notification))
+                                current_iteration = 0
+                                logging.debug(f"{ws_log_prefix} Empty tool result handled directly, resetting iteration count.")
+                                continue
+
+                        except Exception as tool_e:
+                            logging.error(f"{ws_log_prefix} Error processing 'tool_result': {tool_e}")
+                            await send_jsonrpc_error(websocket, JsonRpcErrorCode.INVALID_PARAMS, f"Invalid tool_result params or internal error: {tool_e}", request_id)
 
                 elif rpc_request.method == "cancel": # Add a way to cancel
                     logging.info(f"{ws_log_prefix} Received 'cancel' request (ID: {request_id}).")

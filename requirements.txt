@@ -5,4 +5,8 @@ bitsandbytes
 fastapi
 uvicorn[standard]
 pydantic
-huggingface_hub 
+huggingface_hub
+python-dotenv
+
+# Optional: for INFERENCE_ATTN_IMPLEMENTATION=flash_attention_2 (faster attention on GPU)
+# uv pip install flash-attn

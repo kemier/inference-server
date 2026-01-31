@@ -1,4 +1,12 @@
 *.log
+inference_server.log
+inference_server.log.*
+
+# Downloaded model directories (large weights; use scripts/download_14b_model.py)
+Qwen-14B/
+Qwen2.5-14B-Instruct/
+*-14B/
+*-7B/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -165,3 +173,6 @@ cython_debug/
 
 # Pyright cache
 .pyright_cache/
+
+# Local Hugging Face cache (if used in project)
+.cache/

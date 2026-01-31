@@ -1,16 +1,24 @@
 import logging
+import os
 import sys
+from pathlib import Path
 from typing import Optional
+
+from dotenv import load_dotenv
 from transformers import Pipeline, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import torch
 from logging.handlers import RotatingFileHandler
 
-# --- Model Configuration ---
-# Choose how to specify the model:
-# Option 1: Use a model ID (requires download on first run if not cached)
-# MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B" # Comment this out
-# Option 2: Use a local path (if downloaded with --local-dir)
-MODEL_ID = "./Qwen-14B" # Uncomment this line and ensure the path is correct
+# Load .env from project root so INFERENCE_* vars apply without exporting
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
+# --- Model Configuration (env overrides) ---
+# INFERENCE_MODEL_ID: Hugging Face model id or local path (e.g. ./Qwen-14B or Qwen/Qwen2.5-7B-Instruct)
+# INFERENCE_ATTN_IMPLEMENTATION: sdpa (built-in, no extra dep) | flash_attention_2 (requires flash-attn, faster)
+# INFERENCE_BNB_COMPUTE_DTYPE: float16 | bfloat16 (for 4-bit quant compute dtype)
+MODEL_ID: str = os.environ.get("INFERENCE_MODEL_ID", "./Qwen-14B")
+ATTN_IMPLEMENTATION: str = os.environ.get("INFERENCE_ATTN_IMPLEMENTATION", "sdpa")
+BNB_COMPUTE_DTYPE_STR: str = os.environ.get("INFERENCE_BNB_COMPUTE_DTYPE", "float16")
 # --- End Model Configuration ---
 
 # --- Logging Setup --- 
@@ -40,36 +48,44 @@ model = None
 tokenizer = None
 # --- End Add Globals ---
 
+def _get_bnb_compute_dtype():
+    if BNB_COMPUTE_DTYPE_STR.lower() == "bfloat16":
+        return torch.bfloat16
+    return torch.float16
+
+
 # --- Add load_model function --- 
 def load_model():
     """Loads the LLM model and tokenizer into the shared module."""
-    global model, tokenizer 
+    global model, tokenizer
+    if ATTN_IMPLEMENTATION not in ("sdpa", "flash_attention_2", "eager"):
+        raise ValueError(
+            f"INFERENCE_ATTN_IMPLEMENTATION must be one of sdpa, flash_attention_2, eager; got {ATTN_IMPLEMENTATION!r}"
+        )
     try:
-        logging.info(f"Attempting to load model: {MODEL_ID}")
+        logging.info(f"Attempting to load model: {MODEL_ID} (attn={ATTN_IMPLEMENTATION}, bnb_dtype={BNB_COMPUTE_DTYPE_STR})")
         logging.debug("Loading tokenizer...")
-        # Ensure trust_remote_code=True if needed by the model
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
         logging.info("Tokenizer loaded.")
 
-        # Create BitsAndBytes configuration for 4-bit quantization
+        bnb_dtype = _get_bnb_compute_dtype()
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.float16 # Specify compute dtype here
+            bnb_4bit_compute_dtype=bnb_dtype,
         )
 
         logging.debug("Loading model (this may take time and RAM/VRAM)...")
         model = AutoModelForCausalLM.from_pretrained(
             MODEL_ID,
-            quantization_config=quantization_config, # Use quantization_config instead
-            device_map="auto", # Use auto device mapping
-            # max_memory={0: "12GiB"}, # Optional: specify memory limits if needed
-            trust_remote_code=True, # Ensure trust_remote_code=True if needed
+            quantization_config=quantization_config,
+            device_map="auto",
+            attn_implementation=ATTN_IMPLEMENTATION,
+            trust_remote_code=True,
         )
-        model.eval() # Set model to evaluation mode
+        model.eval()
         logging.info("Model loaded and ready in shared module.")
 
     except Exception as e:
         logging.exception(f"FATAL: Failed to load model {MODEL_ID}. Error: {e}")
-        # Exit if model loading fails, as the server cannot function
         raise SystemExit(f"Model loading failed: {e}")
 # --- End Add load_model function --- 
